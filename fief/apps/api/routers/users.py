@@ -43,6 +43,7 @@ from fief.repositories import (
     TenantRepository,
     UserPermissionRepository,
     UserRepository,
+    UserRoleRepository,
 )
 from fief.schemas.generics import PaginatedResults
 from fief.services.acr import ACR
@@ -55,6 +56,7 @@ from fief.services.user_roles import (
     UserRoleAlreadyExists,
     UserRoleDoesNotExist,
     UserRolesService,
+    UserRolesSyncUnknownRoles,
 )
 from fief.services.webhooks.models import (
     UserDeleted,
@@ -377,6 +379,36 @@ async def create_user_role(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=APIErrorCode.USER_ROLE_CREATE_ALREADY_ADDED_ROLE,
         ) from e
+
+
+@router.put(
+    "/{id:uuid}/roles",
+    name="users:sync_roles",
+    response_model=list[schemas.user_role.UserRole],
+)
+async def sync_user_roles(
+    user_roles_sync: schemas.user_role.UserRolesSync,
+    user: User = Depends(get_user_by_id_or_404),
+    user_role_repository: UserRoleRepository = Depends(
+        get_repository(UserRoleRepository)
+    ),
+    user_roles: UserRolesService = Depends(get_user_roles_service),
+) -> list[schemas.user_role.UserRole]:
+    try:
+        await user_roles.sync_roles(user, user_roles_sync.role_ids)
+    except UserRolesSyncUnknownRoles as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=APIErrorCode.USER_ROLES_SYNC_NOT_EXISTING_ROLES,
+        ) from e
+
+    synced_user_roles = await user_role_repository.list(
+        user_role_repository.get_by_user_statement(user.id)
+    )
+    return [
+        schemas.user_role.UserRole.model_validate(user_role)
+        for user_role in synced_user_roles
+    ]
 
 
 @router.delete(

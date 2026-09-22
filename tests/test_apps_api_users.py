@@ -843,6 +843,186 @@ class TestDeleteUserRole:
 
 
 @pytest.mark.asyncio
+class TestSyncUserRoles:
+    async def test_unauthorized(
+        self,
+        unauthorized_api_assertions: HTTPXResponseAssertion,
+        test_client_api: httpx.AsyncClient,
+        test_data: TestData,
+    ):
+        user = test_data["users"]["regular"]
+        role = test_data["roles"]["castles_manager"]
+        response = await test_client_api.put(
+            f"/users/{user.id}/roles", json={"role_ids": [str(role.id)]}
+        )
+
+        unauthorized_api_assertions(response)
+
+    @pytest.mark.authenticated_admin
+    async def test_unknown_user(
+        self,
+        test_client_api: httpx.AsyncClient,
+        not_existing_uuid: uuid.UUID,
+        test_data: TestData,
+    ):
+        role = test_data["roles"]["castles_manager"]
+        response = await test_client_api.put(
+            f"/users/{not_existing_uuid}/roles", json={"role_ids": [str(role.id)]}
+        )
+
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+
+    @pytest.mark.authenticated_admin
+    async def test_unknown_role(
+        self,
+        test_client_api: httpx.AsyncClient,
+        not_existing_uuid: uuid.UUID,
+        test_data: TestData,
+        main_session: AsyncSession,
+    ):
+        user = test_data["users"]["regular"]
+        visitor = test_data["roles"]["castles_visitor"]
+        response = await test_client_api.put(
+            f"/users/{user.id}/roles",
+            json={"role_ids": [str(visitor.id), str(not_existing_uuid)]},
+        )
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+        json = response.json()
+        assert json["detail"] == APIErrorCode.USER_ROLES_SYNC_NOT_EXISTING_ROLES
+
+        user_role_repository = UserRoleRepository(main_session)
+        user_roles = await user_role_repository.list(
+            user_role_repository.get_by_user_statement(user.id)
+        )
+        assert {user_role.role_id for user_role in user_roles} == {visitor.id}
+
+    @pytest.mark.authenticated_admin
+    async def test_idempotent(
+        self,
+        test_client_api: httpx.AsyncClient,
+        test_data: TestData,
+        main_session: AsyncSession,
+        send_task_mock: MagicMock,
+    ):
+        user = test_data["users"]["regular"]
+        visitor = test_data["roles"]["castles_visitor"]
+        response = await test_client_api.put(
+            f"/users/{user.id}/roles", json={"role_ids": [str(visitor.id)]}
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+
+        json = response.json()
+        assert len(json) == 1
+        assert json[0]["role_id"] == str(visitor.id)
+
+        user_role_repository = UserRoleRepository(main_session)
+        user_roles = await user_role_repository.list(
+            user_role_repository.get_by_user_statement(user.id)
+        )
+        assert len(user_roles) == 1
+
+        send_task_mock.assert_not_called()
+
+    @pytest.mark.authenticated_admin
+    async def test_partial_changes(
+        self,
+        test_client_api: httpx.AsyncClient,
+        test_data: TestData,
+        main_session: AsyncSession,
+        send_task_mock: MagicMock,
+    ):
+        user = test_data["users"]["regular"]
+        visitor = test_data["roles"]["castles_visitor"]
+        manager = test_data["roles"]["castles_manager"]
+        response = await test_client_api.put(
+            f"/users/{user.id}/roles",
+            json={"role_ids": [str(visitor.id), str(manager.id)]},
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+
+        json = response.json()
+        assert {result["role_id"] for result in json} == {
+            str(visitor.id),
+            str(manager.id),
+        }
+
+        user_role_repository = UserRoleRepository(main_session)
+        user_roles = await user_role_repository.list(
+            user_role_repository.get_by_user_statement(user.id)
+        )
+        assert {user_role.role_id for user_role in user_roles} == {
+            visitor.id,
+            manager.id,
+        }
+
+        # One call for the webhook trigger, one for the permission sync task
+        assert send_task_mock.call_count == 2
+        send_task_mock.assert_any_call(
+            on_user_role_created, str(user.id), str(manager.id)
+        )
+
+    @pytest.mark.authenticated_admin
+    async def test_add_and_delete_together(
+        self,
+        test_client_api: httpx.AsyncClient,
+        test_data: TestData,
+        main_session: AsyncSession,
+        send_task_mock: MagicMock,
+    ):
+        user = test_data["users"]["regular"]
+        visitor = test_data["roles"]["castles_visitor"]
+        manager = test_data["roles"]["castles_manager"]
+        response = await test_client_api.put(
+            f"/users/{user.id}/roles", json={"role_ids": [str(manager.id)]}
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+
+        json = response.json()
+        assert [result["role_id"] for result in json] == [str(manager.id)]
+
+        user_role_repository = UserRoleRepository(main_session)
+        user_roles = await user_role_repository.list(
+            user_role_repository.get_by_user_statement(user.id)
+        )
+        assert {user_role.role_id for user_role in user_roles} == {manager.id}
+
+        # Two calls for the webhook triggers, two for the permission sync tasks
+        assert send_task_mock.call_count == 4
+        send_task_mock.assert_any_call(
+            on_user_role_deleted, str(user.id), str(visitor.id)
+        )
+        send_task_mock.assert_any_call(
+            on_user_role_created, str(user.id), str(manager.id)
+        )
+
+    @pytest.mark.authenticated_admin
+    async def test_empty_target(
+        self,
+        test_client_api: httpx.AsyncClient,
+        test_data: TestData,
+        main_session: AsyncSession,
+    ):
+        user = test_data["users"]["regular"]
+        response = await test_client_api.put(
+            f"/users/{user.id}/roles", json={"role_ids": []}
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json() == []
+
+        user_role_repository = UserRoleRepository(main_session)
+        user_roles = await user_role_repository.list(
+            user_role_repository.get_by_user_statement(user.id)
+        )
+        assert len(user_roles) == 0
+
+
+@pytest.mark.asyncio
 class TestListUserOAuthAccounts:
     async def test_unauthorized(
         self,
