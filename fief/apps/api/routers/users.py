@@ -43,6 +43,7 @@ from fief.repositories import (
     TenantRepository,
     UserPermissionRepository,
     UserRepository,
+    UserRoleRepository,
 )
 from fief.schemas.generics import PaginatedResults
 from fief.services.acr import ACR
@@ -377,6 +378,41 @@ async def create_user_role(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=APIErrorCode.USER_ROLE_CREATE_ALREADY_ADDED_ROLE,
         ) from e
+
+
+@router.put(
+    "/{id:uuid}/roles",
+    name="users:sync_roles",
+    response_model=PaginatedResults[schemas.user_role.UserRole],
+)
+async def sync_user_roles(
+    user_roles_sync: schemas.user_role.UserRolesSync,
+    user: User = Depends(get_user_by_id_or_404),
+    role_repository: RoleRepository = Depends(get_repository(RoleRepository)),
+    user_role_repository: UserRoleRepository = Depends(
+        get_repository(UserRoleRepository)
+    ),
+    user_roles: UserRolesService = Depends(get_user_roles_service),
+) -> PaginatedResults[schemas.user_role.UserRole]:
+    roles = await role_repository.get_by_ids(user_roles_sync.ids)
+    if len(roles) != len(set(user_roles_sync.ids)):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=APIErrorCode.USER_ROLES_SYNC_NOT_EXISTING_ROLE,
+        )
+
+    await user_roles.sync_roles(user, roles)
+
+    synced_user_roles = await user_role_repository.list(
+        user_role_repository.get_by_user_statement(user.id)
+    )
+    return PaginatedResults(
+        count=len(synced_user_roles),
+        results=[
+            schemas.user_role.UserRole.model_validate(user_role)
+            for user_role in synced_user_roles
+        ],
+    )
 
 
 @router.delete(
