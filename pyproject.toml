@@ -213,7 +213,7 @@ classifiers = [
 dynamic = ["version"]
 requires-python = ">=3.12"
 dependencies = [
-    "aiomysql ==0.2.0",
+    "aiomysql ==0.3.2",
     "aiosqlite ==0.20.0",
     "alembic ==1.14.0",
     "apscheduler ==3.10.4",
